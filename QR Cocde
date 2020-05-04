@@ -1,0 +1,371 @@
+#pragma warning(disable:6031)
+#pragma warning(disable:6386)
+#define _CRT_SECURE_NO_WARNINGS
+#include<iostream>
+#include<stdlib.h>
+#include<Windows.h>
+#include<vector>
+#include<string>
+#include<math.h>
+#include<string.h>
+using namespace std;
+#define Width 40
+#define Height 20
+const int Size = 21;
+struct GF {
+	GF() :prim(0x11D) { init_table(); }
+	int Pow(int x, int pow) {
+		return exp[(log[x] * pow) % 255];
+	}
+	int mul(int x, int y) {
+		if (!x || !y)return 0;
+		return exp[log[x] + log[y]];
+	}
+	vector<int>PolyMul(vector<int>& p, vector<int>& q) {
+		int sp = p.size(), sq = q.size();
+		vector<int>res(sp + sq - 1);
+		for (int i = 0; i < sq; i++)
+			for (int j = 0; j < sp; j++)
+				res[i + j] ^= mul(p[j], q[i]);
+		return res;
+	}
+	vector<int>rsEncode(vector<int>&sor, int nsym) {
+		vector<int>gen = rsGenPoly(nsym);
+		int sSor = sor.size(), sGen = gen.size();
+		vector<int>res(sSor + sGen - 1);
+		copy(sor.begin(), sor.end(), res.begin());
+		for (int i = 0; i < sSor; i++) {
+			int coef = res[i];
+			if (coef)
+				for (int j = 1; j < sGen; j++)
+					res[i + j] ^= mul(gen[j], coef);//因为生成多项式最高位系数=1，所以每次的商确定，=coef
+		}
+		copy(sor.begin(), sor.end(), res.begin());
+		return res;
+	}
+	vector<int>rsGenPoly(int nsym) {
+		vector<int>g = { 1 };
+		for (int i = 0; i < nsym; i++) {
+			vector<int>tv{ 1, Pow(2, i) };
+			g = PolyMul(g, tv);
+		}
+		return g;
+	}
+private:
+	int exp[512];
+	int log[256];
+	const int prim;
+	void init_table(void) {
+		int x = 1;
+		for (int i = 0; i < 255; i++) {//a^255=a^0=1
+			exp[i] = x;
+			log[x] = i;
+			x <<= 1;
+			if (x & 0x100)
+				x ^= prim;//GF取模
+		}
+		for (int i = 255; i < 512; i++)
+			exp[i] = exp[i - 255];//双倍表，省去取模
+	}
+};
+struct Draw {
+	Draw() :white(RGB(242, 242, 242)), black(RGB(0, 0, 0)),Ox(0),Oy(0),Size(9),xOf(8),yOf(31) {
+		Hwnd = GetConsoleWindow();
+		Dc = GetWindowDC(Hwnd);
+	}
+	~Draw() { ReleaseDC(Hwnd, Dc); }
+	void setStart(int ox, int oy) { Ox = ox, Oy = oy; }//绘画起点[单位:像素]
+	void setSize(int size) { Size = size; }
+	void setPoint(int x, int y, bool col) {
+		SetPixel(Dc, Ox + x + xOf, Oy + y + yOf, col ? white : black);//此API慢得一匹，慎用（但我没有替代品QAQ）
+	}
+	void setDot(int x, int y, bool col = 0) {
+		for (int i = y * Size; i < (y + 1) * Size; i++)
+			for (int j = x * Size; j < (x + 1) * Size; j++)
+				setPoint(j, i, col);
+	}
+private:
+	HDC Dc;
+	HWND Hwnd;
+	COLORREF white, black;
+	int Ox, Oy;
+	int Size;
+	const int xOf,yOf;//offset
+};
+Draw dr;//全局共用
+bool map[Size][Size];
+void init(void);
+void hideCur(void);
+void setWinSize(int width, int height);
+void dFinder(int x,int y);
+void dTimeSeq(int x, int y, int len,bool dir = 0);
+void dDot(void);
+void dFixed(void);
+void drawAll(bool map[Size][Size]);
+string toBin(int ch, int bits = 8);
+int toDec(const string& bitstr);
+vector<int> enCode(const string& data);
+void fillByte(int x, int y, int byte, int dir);
+void fillData(vector<int>& data);
+void buildMask(bool mask[Size][Size], bool(*func)(int, int));
+void addMask(bool map[Size][Size],int index);
+int fmtEncode(int fmt);
+void fillInfo(int fmt);
+int penalty(bool map[Size][Size]);
+void selectMask(void);
+void QS_Code(string data);
+int main(void)
+{
+	init();
+	string data;
+	while (getline(cin, data)) {
+		try {
+			QS_Code(data);
+		}
+		catch (out_of_range err) {
+			cout << err.what() << '\n';
+			continue;
+		}
+		drawAll(map);
+	}
+	return 0;
+}
+void init(void)
+{
+	dr.setStart(250, 80);
+	hideCur();
+	SetConsoleTitle("[QR Code] by MrBeanC");
+	setWinSize(Width, Height);
+	system("color F0");
+	Sleep(200);//防止窗口redraw擦除pixel
+}
+void hideCur(void) {
+	CONSOLE_CURSOR_INFO cci = { 1,0 };
+	SetConsoleCursorInfo(GetStdHandle(STD_OUTPUT_HANDLE), &cci);
+}
+void setWinSize(int width, int height) {
+	static char com[100];
+	sprintf(com, "mode con cols=%d lines=%d", width * 2, height);
+	system(com);
+}
+void dFinder(int x, int y) {//draw Finder Pattern
+	for (int i = 0; i < 7; i++)
+		for (int j = 0; j < 7; j++)
+			if (((i == 1 || i == 5) && j > 0 && j < 6) || ((j == 1 || j == 5) && i > 0 && i < 6))
+				map[y + i][x + j] = 1;
+			else
+				map[y + i][x + j] = 0;
+}
+void dTimeSeq(int x, int y, int len,bool dir) {//dir==1?down:right
+	for (int i = 0; i < len; i++)
+		dir ? (map[i + y][x] = i & 1) : (map[y][i + x] = i & 1);
+}
+void dDot(void) {
+	map[13][8] = 0;
+}
+void dFixed(void) {
+	dFinder(0, 0);
+	dFinder(14, 0);
+	dFinder(0, 14);
+	dTimeSeq(8, 6, 5);
+	dTimeSeq(6, 8, 5, 1);
+	dDot();
+}
+void drawAll(bool map[Size][Size]) {
+	for (int i = 0; i < Size; i++)
+		for (int j = 0; j < Size; j++)
+			if (!map[i][j])
+				dr.setDot(j, i);
+}
+string toBin(int ch,int bits) {
+	string ans;
+	for (int i = bits - 1; i >= 0; i--)//default 8 bits
+		ans += ((ch & (1 << i)) >> i) + '0';
+	return ans;
+}
+int toDec(const string& bitstr) {
+	int ans = 0, size = bitstr.size();
+	for (int i = size - 1; i >= 0; i--)
+		ans += (bitstr[i] - '0') * (1 << (size - 1 - i));
+	return ans;
+}
+vector<int> enCode(const string& data) {
+	if (data.size() > 17)
+		throw out_of_range("Err: Data.size() > 17");
+	string bitstr = "0100" + toBin(data.size());
+	for (auto ch : data)
+		bitstr += toBin(ch);
+	bitstr += "0000";
+	vector<int>v;
+	int size = bitstr.size();
+	auto iter = bitstr.begin();
+	for (int i = 0; i < size; i += 8)
+		v.push_back(toDec(string(iter + i, iter + i + 8)));
+	while (v.size() < 19) {
+		v.push_back(236);//11101100
+		if (v.size() < 19)
+			v.push_back(17);//00010001
+	}
+	return GF().rsEncode(v, 7);//纠错码 RS code
+}
+void fillByte(int x,int y,int byte, int dir) {//up=1
+	string str = toBin(byte);
+	for (int i = 0; i < 8; i++) {
+		map[y][x] = !(str[i] - '0');
+		if (i & 1)
+			x++, y -= dir;
+		else
+			x--;
+		if (y == 6)y -= dir;
+	}
+}
+void fillData(vector<int>& data) {
+	int x = Size - 1, y = Size - 1;//右下角
+	int dir = 1;
+	for (int i = 0; i < 22;i++) {
+		fillByte(x, y, data[i], dir);
+		y -= 4 * dir;
+		if ((y == 8 && x >= 13) || y <= 0)
+			y++, x -= 2, dir = -dir;
+		else if (y >= Size)
+			y--, x -= 2, dir = -dir;
+		else if ((x == 12 && y == 4) || (x == 10 && y == 8))
+			y -= dir;
+	}
+	fillByte(8, 12, data[22], 1);
+	x = 5, y = 9, dir = -1;
+	for (int i = 23; i < 26; x -= 2, y -= 3 * dir, dir = -dir, i++)
+		fillByte(x, y, data[i], dir);
+}
+void buildMask(bool mask[Size][Size], bool(*func)(int, int)) {
+	for (int i = 0; i < Size; i++)
+		for (int j = 0; j < Size; j++)
+			if ((i <= 8 && j <= 8) || (j <= 8 && i >= 13) || (j >= 13 && i <= 8) || j == 6 || i == 6)
+				mask[i][j] = 1;
+			else
+				mask[i][j] = func(i, j);
+}
+void addMask(bool map[Size][Size], int index) {
+	bool Mask[Size][Size];
+	bool(*mask[8])(int, int);
+	mask[0] = [](int i, int j)->bool {return (i + j) % 2; };
+	mask[1] = [](int i, int j)->bool {return i % 2; };
+	mask[2] = [](int i, int j)->bool {return j % 3; };
+	mask[3] = [](int i, int j)->bool {return (i + j) % 3; };
+	mask[4] = [](int i, int j)->bool {return (i/2 + j/3) % 2; };
+	mask[5] = [](int i, int j)->bool {return i * j % 2 + i * j % 3; };
+	mask[6] = [](int i, int j)->bool {return (i * j % 2 + i * j % 3) % 2; };
+	mask[7] = [](int i, int j)->bool {return ((i + j) % 2 + i * j % 3) % 2; };
+	buildMask(Mask, mask[index - 1]);
+	for (int i = 0; i < Size; i++)
+		for (int j = 0; j < Size; j++)
+			map[i][j] = (map[i][j] == Mask[i][j]);
+}
+int fmtEncode(int fmt) {
+	const int g = 0x537;
+	const int prim = 0x5412;
+	int code = fmt << 10;
+	for (int i = 4; i >= 0; i--)
+		if (code & (1 << i + 10))
+			code ^= (g << i);
+	return ((fmt << 10) ^ code) ^ prim;
+}
+void fillInfo(int fmt) {
+	string str = toBin(fmt, 15);
+	for (int i = 0; i < 7; i++)
+		map[20-i][8] = !(str[i] - '0');//可能要非//实锤
+	for (int i = 7; i < 15; i++) {
+		map[14 - i][8] = !(str[i] - '0');
+		if (i == 9)i++;
+	}
+	for (int i = 0; i < 8; i++) {
+		map[8][i] = !(str[i] - '0');
+		if (i == 7)i++;
+	}
+	for (int i = 7; i < 15; i++)
+		map[8][6 + i] = !(str[i] - '0');
+}
+int penalty(bool map[Size][Size]) {
+	int res = 0;
+	for (int i = 0; i < Size; i++) {
+		int j = 0;
+		int len = 1;
+		while (j < Size) {
+			bool col = map[i][j];
+			while (j + 1 < Size && map[i][j + 1] == col)
+				j++, len++;
+			if (len >= 5)res += 3 + (len - 5);
+			j++, len = 1;
+		}
+	}
+	for (int j = 0; j < Size; j++) {
+		int i = 0;
+		int len = 1;
+		while (i < Size) {
+			bool col = map[i][j];
+			while (i + 1 < Size && map[i + 1][j] == col)
+				i++, len++;
+			if (len >= 5)res += 3 + (len - 5);
+			i++, len = 1;
+		}
+	}
+	for (int i = 0; i < Size - 1; i++)
+		for (int j = 0; j < Size - 1; j++) {
+			bool col = map[i][j];
+			bool flag = 0;
+			for (int a = i; a <= i + 1; a++)
+				for (int b = j; b <= j + 1; b++)
+					if (map[a][b] != col) {
+						flag = 1;
+						break;
+					}
+			if (!flag)res += 3;
+		}
+	for (int i = 0; i < Size; i++) {
+		string str;
+		for (int j = 0; j < Size; j++)
+			str += map[i][j] + '0';
+		if (str.find("01000101111") != string::npos || str.find("11110100010") != string::npos)
+			res += 40;
+	}
+	for (int j = 0; j < Size; j++) {
+		string str;
+		for (int i = 0; i < Size; i++)
+			str += map[i][j] + '0';
+		if (str.find("01000101111") != string::npos || str.find("11110100010") != string::npos)
+			res += 40;
+	}
+	int W = 0;
+	for (int i = 0; i < Size; i++)
+		for (int j = 0; j < Size; j++)
+			W += map[i][j];
+	int B = Size * Size - W;
+	int rate = (double)B / (1.0 * Size * Size) * 100;
+	int a = rate / 5 * 5, b = ceil(1.0 * rate / 5) * 5;
+	res += min(abs(a - 50), abs(b - 50)) * 2;
+	return res;
+}
+void selectMask(void) {
+	int Min = 0x3f3f3f3f;
+	int index = 1;
+	for (int i = 1; i <= 8; i++) {
+		bool temp[Size][Size];
+		memcpy(temp, map, sizeof(temp));
+		addMask(temp, i);
+		fillInfo(fmtEncode(toDec("01"+toBin(i,3))));
+		int pen = penalty(temp);
+		if (pen < Min)
+			Min = pen, index = i;
+	}
+	addMask(map, index);
+	fillInfo(fmtEncode(toDec("01" + toBin(index - 1, 3))));
+}
+void QS_Code(string data) {
+	fill(map[0], map[0] + Size * Size, 1);//not map 因为template需要正确类型
+	system("cls");
+	Sleep(200);
+	dFixed();
+	vector<int> vdata = enCode(data);//返回值丢弃产生的警告
+	fillData(vdata);
+	selectMask();
+}
